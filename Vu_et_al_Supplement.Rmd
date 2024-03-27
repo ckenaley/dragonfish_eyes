@@ -1,0 +1,576 @@
+---
+title: "Supplement"
+author: "Ebeling et. al"
+date: "2024-03-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F,message=F)
+library(tidyverse)
+library(vroom)
+library(lamW)
+library(ggsci)
+library(viridis)
+library(metR)
+library(cowplot)
+library(MuMIn)
+library(showtext)
+library(broom)
+library(kableExtra)
+library(ggbeeswarm)
+library(xtable)
+ options(knitr.kable.NA = ' ')
+```
+
+## Load data and preliminaries
+
+### Miscellaneous for plotting
+```{r plot extras,message=F}
+
+#male and female symbols for plotting
+female = intToUtf8(9792) 
+male = intToUtf8(9794)
+
+#expressions for plotting
+flux.exp <- expression(paste('flux (E, ', photons%*%s^{-1},')'))
+log.flux.exp <- expression(paste('log Flux (E, ',photons%*%s^{-1},')'))
+po.exp <-  expression(paste("log PO area "," (",mm^3,")",sep=" "))
+vol.exp <- expression(paste("log Lens vol. "," (",mu,m^3,")",sep=" "))
+length.exp <- expression(paste("log "," ",L[s]," (mm)",sep=" "))
+diam.exp <- expression(paste("log Lens diam. "," (",mu,m,")",sep=" "))
+delta.exp <- expression(paste("Detection difference "," (",Delta,r[male],")",sep=" "))
+
+
+#for sex symbols
+sex_symbols <- function(x,y,drop="P. guernei",size=10){
+  d <- tibble(species=rep(c("M. niger","P. guernei"),2),
+              label=c(female,female,male,male),
+              angle=c(0,0,-45,-45)) %>% filter(species!=drop) %>% 
+    mutate(x=x,y=y)
+
+  return(d)
+
+}
+
+
+```
+
+### Read in data
+```{r data,message=F}
+
+#read in eye and PO data
+all.dat <- read_csv("eye_PO_data.csv") %>% 
+  mutate(species=ifelse(genus=="Malacosteus","M. niger","P. guernei"),
+         ao=ifelse(is.na(ao),0,ao),
+         sex2=ifelse(sex=="F","Female","Male")
+)
+
+
+#add flux from Mensinger and Case
+flux.dat <- read.csv("mes.case.flux.dat.csv") %>% mutate(po_area=pi*(PO/2)^2)
+flux.lm <- glm(log(flux)~po_area,flux.dat,family=gaussian)
+
+flux.dat$pred <- predict(flux.lm) %>% exp
+
+all.dat <- all.dat  %>% 
+  filter(sex%in% c("M","F")) %>% 
+  mutate(flux=predict(flux.lm,newdata = data.frame(po_area=ifelse(genus=="Photostomias",po+ao,po))) %>% exp)
+
+```
+
+## Detection distance model
+
+```{r "detection model"}
+
+#warrant (2000) model
+#N=[EA^2/16r^2]e^-(alph*r)
+
+#N, how many photons enter eye
+#E, photons in flash
+#A, pupil diameter
+#r, distance from flash.
+#alpha, total attenuation coefficient
+
+#reduces to r*ln(r)=ln(sqrt(PA^2/N))
+#so r=e^w(ln(sqrt(PA^2/N)))
+#https://www.r-bloggers.com/getting-that-x-with-the-glog-function-and-lamberts-w/
+#matmatica where a=alpha (attenuation); b is (E*A^2)/(16*N)
+#https://www.wolframalpha.com/input/?i=solve+r%5E2*e%5E(a*r)%3Db+for+r
+
+
+#where r is distance, atten is alpha (0.05/m)
+r.dist <- function(E,A,atten=0.05,N=5){
+  if(is.na(A)){return(NA)}else{
+  b <- (E*A^2)/(16*N)
+r <- (2*lambertW0((atten*sqrt(b))/2))/atten
+return(r)}
+}
+```
+
+## Predict detection distance
+
+We predicted detection distance by: 
+
+  1. for both sexes based on mean flux of opposite sex of same size and  measured eye diameter 
+  <!-- (of all spec. measured) and  -->
+  
+  2. based on mean flux of opposite sex and an eye diameter predicted by female eye size.
+
+### Both sexes based on mean flux of mature individual of opposite sex
+
+```{r "detect pred"}
+
+#mean flux for M & F of each species
+
+# mal 6.6, 9.2
+#phot 6.41, 7.14
+
+#female eye size
+#simple lm, see below.
+mal_diam_fit <- lm(diam~sl,all.dat %>% filter(genus=="Malacosteus",sex=="F"))
+phot_diam_fit <- lm(diam~sl,all.dat %>% filter(genus=="Photostomias",sex=="F"))
+
+#female flux magnitude
+#log-log see below
+
+mal_flux_fit <- lm(log(flux)~log(sl)*sex,all.dat %>% filter(genus=="Malacosteus"))
+phot_flux_fit <-  lm(log(flux)~log(sl)*sex,all.dat %>% filter(genus=="Photostomias"))
+
+
+all.dat <- all.dat %>% 
+  filter(!is.na(diam),!is.na(sl),!is.na(sex)) %>% 
+  mutate(n=1:n()) %>%
+  mutate(m_diam=ifelse(
+    genus=="Malacosteus",
+    predict(mal_diam_fit,newdata=data.frame(sl=sl)),
+    predict(phot_diam_fit,newdata=data.frame(sl=sl)) 
+    ))%>% #predict eye diam based on female fit
+  mutate(alt_sex=ifelse(sex=="M","F","M")) %>% 
+  group_by(n,sex,genus) %>% ## flux of opposite sex of same size
+  mutate(m_flux=ifelse(genus=="Malacosteus",
+                       exp(predict(mal_flux_fit,newdata = data.frame(sl=sl,sex=alt_sex))),
+                       exp(predict(phot_flux_fit,newdata =(data.frame(sl=sl,sex=alt_sex))))
+                       )) %>% 
+  mutate(detect=r.dist(E=m_flux,A=diam), #detection based on 1
+         detect2=r.dist(E=m_flux,A=m_diam) #detection based on 2
+         )
+```
+
+### Difference in detenction distance of males with and without lens sexual dimorphism ($\Delta r_{male}$)
+
+```{r}
+det_diff <- all.dat %>% 
+  select(genus,species,sex,sl,detect,detect2,diam,m_diam) %>% 
+  pivot_longer(cols=detect:m_diam)%>%
+  group_by(species,sex,n,sl) %>% 
+    summarise(det_diff_=value[1]-value[2],eye_diff=value[3]-value[4]) %>% 
+  filter(sex=="M")
+
+```
+
+## Regression modeling and model selection
+
+### Flux models
+```{r "flux models"}
+#Malacosteus flux models
+
+d <- all.dat %>% filter(genus=="Malacosteus",!is.na(flux))
+lm1_flux_mal <- lm(flux~sl*sex,d,na.action = "na.fail")
+lm2_flux_mal<- lm(log(flux)~log(sl)*sex,d,na.action = "na.fail")
+mal_flux_dr <- merge(dredge(lm1_flux_mal),dredge(lm2_flux_mal))%>% mutate(species=d$species[1])
+mal_flux_mod <- mal_flux_dr %>% get.models(subset = delta ==0)
+anova(mal_flux_mod[[1]]) %>% tidy %>% kable(caption = "ANOVA results of best-fitting flux model for M. niger") %>% kable_minimal()
+
+
+#Photostomias flux models
+d <- all.dat %>% filter(genus=="Photostomias",!is.na(flux),!is.na(sl))
+lm1_flux_phot <- lm(flux~sl*sex,d,na.action = "na.fail")
+lm2_flux_phot<- lm(log(flux)~log(sl)*sex,d,na.action = "na.fail")
+phot_flux_dr <- merge(dredge(lm1_flux_phot),dredge(lm2_flux_phot))%>% mutate(species=d$species[1])
+phot_flux_mod <- phot_flux_dr %>% get.models(subset = delta ==0)
+anova(phot_flux_mod[[1]])%>% tidy %>% kable(caption = "ANOVA results of best-fitting flux model for P. guernei") %>% kable_minimal()
+```
+### Lens diameter models
+```{r "lens models"}
+
+#Lens diameter models
+#Malacosteus flux models
+
+d <- all.dat %>% filter(genus=="Malacosteus",!is.na(diam))
+lm1_diam_mal <- lm(diam~sl*sex,d,na.action = "na.fail")
+lm2_diam_mal<- lm(log(diam)~log(sl)*sex,d,na.action = "na.fail")
+mal_diam_dr <- merge(dredge(lm1_diam_mal),dredge(lm2_diam_mal))%>% mutate(species=d$species[1])
+mal_diam_mod <- mal_diam_dr %>% get.models(subset = delta ==0)
+anova(mal_diam_mod[[1]])%>% tidy %>% kable(caption = "ANOVA results of best-fitting lens-diameter model for M. niger") %>% kable_minimal()
+
+
+#Photostomias diam models
+d <- all.dat %>% filter(genus=="Photostomias",!is.na(diam),!is.na(sl))
+lm1_diam_phot <- lm(diam~sl*sex,d,na.action = "na.fail")
+lm2_diam_phot<- lm(log(diam)~log(sl)*sex,d,na.action = "na.fail")
+phot_diam_dr <- merge(dredge(lm1_diam_phot),dredge(lm2_diam_phot))%>% mutate(species=d$species[1])
+phot_diam_mod <- phot_diam_dr %>% get.models(subset = delta ==0)
+anova(phot_diam_mod[[1]])%>% tidy %>% kable(caption = "ANOVA results of best-fitting lens-diamter model for P. guernei") %>% kable_minimal()
+```
+
+### Detection distance models
+```{r "detect models",message=F}
+#Malacosteus detect models
+
+d <- all.dat %>% filter(genus=="Malacosteus",!is.na(detect))
+lm1_detect_mal <- lm(detect~sl*sex,d,na.action = "na.fail")
+lm2_detect_mal<- lm(log(detect)~log(sl)*sex,d,na.action = "na.fail")
+mal_detect_dr <- merge(dredge(lm1_detect_mal),dredge(lm2_detect_mal))%>% mutate(species=d$species[1])
+mal_detect_mod <- mal_detect_dr %>% get.models(subset = delta ==0)
+anova(mal_detect_mod[[1]]) %>% tidy %>% kable(caption = "ANOVA results of best-fitting detection distance model for M. niger") %>% kable_minimal()
+
+#Photostomias detect models
+d <- all.dat %>% filter(genus=="Photostomias",!is.na(detect))
+lm1_detect_phot <- lm(detect~sl*sex,d,na.action = "na.fail")
+lm2_detect_phot<- lm(log(detect)~log(sl)*sex,d,na.action = "na.fail")
+phot_detect_dr <- merge(dredge(lm1_detect_phot),dredge(lm2_detect_phot)) %>% mutate(species=d$species[1]) 
+phot_detect_mod <- phot_detect_dr %>% get.models(subset = delta ==0)
+anova(phot_detect_mod[[1]]) %>% tidy %>% kable(caption = "ANOVA results of best-fitting detection distance model for P. guernei") %>% kable_minimal()
+```
+
+### Difference in male detection distance with and without a dimorphic eye ($\Delta r_{male}$)
+
+```{r detfif}
+
+t.test(det_diff%>% filter(species=="M. niger") %>% pull(det_diff_),alternative = "greater")
+
+t.test(det_diff%>% filter(species=="P. guernei") %>% pull(det_diff_),alternative = "greater")
+
+
+```
+### Model selection
+
+### Flux AIC table
+
+A positively allometric model fits best for both species. 
+
+```{r "AIC"}
+
+#scaling coefficients
+coef(mal_flux_mod[[1]])[2]
+coef(phot_flux_mod[[1]])[2]
+
+flux_AIC <- base::rbind(mal_flux_dr %>% tibble(),phot_flux_dr %>% tibble) %>% group_by(species) %>% 
+  mutate(weight=Weights(AICc)) %>% 
+  select(species,sex:df,AICc:weight) %>% 
+  filter(delta<30) 
+  
+
+flux_AIC%>% 
+  kable(caption="Model fitting metrics for photophore flux regressions in both species") %>% 
+   kable_minimal() 
+
+anova(mal_flux_mod[[1]]) %>% kable(caption="ANOVA table for the best fitting flux regression model for M. niger") %>% kable_minimal()
+
+anova(phot_flux_mod[[1]]) %>% kable(caption = "ANOVA table for the best fitting flux regression model for P. guernei") %>% kable_minimal()
+
+
+```
+### Lens AIC Tables
+
+An isometric, linear model fits best for both species. 
+
+```{r "lens AIC"}
+
+lens_AIC <- base::rbind(mal_diam_dr %>% tibble(),phot_diam_dr %>% tibble) %>%
+  group_by(species) %>% 
+  mutate(weight=Weights(AICc)) %>% 
+  select(species,sex:df,AICc:weight) %>% 
+  filter(delta<30) 
+
+lens_AIC %>%
+  kable(caption="Model fitting metrics for photophore lens-diameter regressions in both species") %>% 
+  kable_minimal()
+
+
+anova(mal_diam_mod[[1]]) %>% kable(caption="ANOVA table for the best fitting lens-diameter regression model for M. niger") %>% kable_minimal()
+
+anova(phot_diam_mod[[1]]) %>% kable(caption = "ANOVA table for the best fitting lens-diameter regression model for P. guernei") %>% kable_minimal()
+
+```
+### Detection-distance AIC Tables
+
+A negatively allometric fits best for both species. 
+```{r "detect AIC"}
+#scaling coefficients
+coef(mal_detect_mod[[1]])
+coef(phot_detect_mod[[1]])
+
+detect_AIC <- base::rbind(mal_detect_dr %>% tibble(),phot_detect_dr %>% tibble) %>% 
+  group_by(species) %>% 
+  mutate(weight=Weights(AICc)) %>% 
+  select(species,sex:df,AICc:weight) %>% 
+  filter(delta<60) 
+
+detect_AIC %>%
+  kable(caption="Model fitting metrics for photophore detection distance regressions in both species") %>% kable_minimal()
+  
+anova(mal_detect_mod[[1]]) %>% kable(caption="ANOVA table for the best fitting detection-distance regression model for M. niger") %>% kable_minimal()
+
+anova(phot_detect_mod[[1]]) %>% kable(caption = "ANOVA table for the best fitting detection-distance regression model for P. guernei") %>% kable_minimal()
+
+
+```
+
+### Effect of Larger Eye Size on Detection difference 
+
+## Figures
+
+### Figure 1
+```{r fig1,warning=F}
+
+########## Figure 1 #########
+po_reg_p <-  all.dat %>% 
+  ggplot(aes(sl,flux,color=sex2,shape=sex2))+
+  geom_point(size=3)+geom_smooth(method="lm", se=F)+
+  theme_classic(15)+ylab(flux.exp)+facet_wrap(.~species,scales="free")+xlab("")+theme(strip.background = element_blank(),strip.text =element_text(face = "italic"),legend.position = c(0.625,0.75),axis.text.y = element_text(size=8))+scale_x_continuous(trans='log10')+scale_y_continuous(trans='log10')+scale_color_viridis(name="Sex",discrete = T,begin=.9,end=.5)+scale_shape_manual(name = "Sex",values = c(15,1))
+
+
+lens_reg_p <-  all.dat %>% 
+  ggplot(aes(sl,diam*1e3,color=sex2,shape=sex2))+
+  geom_point(size=3)+geom_smooth(method="lm", se=F)+theme_classic(15)+ylab("Lens diam. (mm)")+facet_wrap(.~species,scales="free")+xlab("")+theme(strip.background = element_blank(), strip.text.x = element_blank(),legend.position = "none",strip.text =element_text(face = "italic"))+scale_color_viridis(name="Sex",discrete = T,begin=.9,end=.5)+scale_shape_manual(name = "Sex",values = c(15,1))
+
+
+det_dist_reg_p <-  all.dat %>% 
+  ggplot(aes(sl,detect,color=sex2,shape=sex2))+
+  geom_point(size=3)+geom_smooth(method="lm", se=F)+theme_classic(15)+ylab("Det. dist. (r, m)")+facet_wrap(.~species,scales="free")+xlab("Standard Length (cm)")+theme(strip.background = element_blank(),legend.position = "none",strip.text.x = element_blank())+scale_x_continuous(trans='log10')+scale_y_continuous(trans='log10')+scale_color_viridis(name="Sex",discrete = T,begin=.9,end=.5)+scale_shape_manual(name = "Sex",values = c(15,1))
+
+reg_p<- plot_grid(po_reg_p,lens_reg_p,det_dist_reg_p,ncol=1,labels = c("A","B","C"),label_size = 20,vjust = c(1,0.55,1),rel_widths = c(1.2,0.8,0.8))
+
+print(reg_p)
+
+
+```
+
+
+### Figure 3
+
+```{r fig2a,message=F}
+
+rd_p <- det_diff %>% 
+  ggplot(aes(species,det_diff_))+geom_boxplot(outlier.alpha = 0)+geom_quasirandom(width = 0.15)+ylab(delta.exp)+xlab("")+theme_classic(9)+scale_x_discrete(position = "top") +geom_hline(yintercept=0,linetype=2)+geom_text(aes(x=0.75,y=4,label="p<<0.001"),inherit.aes = F)+geom_text(aes(x=2.25,y=4,label="p<<0.001"),inherit.aes = F)+theme(axis.text.x =element_text(face = "italic",size = 12))
+
+```
+
+
+```{r maldet,eval=T,echo=F}
+#model detection based on predicted eye size and flux of opposite sex across a range of lengths
+
+sls <- seq(6,15,0.1)
+
+mal.flux <- lm(log(flux)~log(sl)*sex,all.dat %>% filter(genus=="Malacosteus"))
+mal.diam <- lm(diam~sl*sex,all.dat %>% filter(genus=="Malacosteus"))
+
+
+mal.mod_dat <- expand_grid(female_sl=sls,male_sl=sls) %>%
+  mutate(
+    n=1:n(),
+  ) %>% 
+group_by(n) %>% 
+  mutate(
+  male_flux=predict(
+    mal.flux,newdata=data.frame(sex="M",sl=male_sl)) %>% exp,
+    male_diam=predict(mal.diam,newdata=data.frame(sex="M",sl=male_sl)),
+    fem_flux=predict(mal.flux,newdata=data.frame(sex="F",sl=female_sl)) %>% exp,
+    fem_diam=predict(mal.diam,newdata=data.frame(sex="F",sl=female_sl)),
+    male_det=r.dist(E=fem_flux,A=male_diam),
+    fem_det=r.dist(E=male_flux,A=fem_diam),
+  det_ratio=log(fem_det)-log(male_det))
+
+
+#male gap
+mal.det_ratio_p<- mal.mod_dat %>% 
+   ggplot(aes(male_sl,female_sl,fill=det_ratio))+geom_tile(alpha=0.85)+scale_fill_viridis("Detection log Ratio",option="H",end=0.95)+geom_contour2(
+     aes(z=det_ratio,label = after_stat(level)),
+     col="black",
+     skip=0.5,
+     breaks = AnchorBreaks(0, binwidth = 0.5),
+    label.placer=label_placer_fraction(frac=0.25,                              rot_adjuster=isoband::angle_halfcircle_bottom())
+     )+theme_minimal(10)+theme(legend.position = "bottom",legend.key.width= unit(0.5, 'cm'),legend.text = element_text(size=7), axis.ticks =element_line(size=1))+coord_fixed()+xlab("Male Standard Length (cm)")+ylab("Female Standard Length")+scale_x_continuous(expand = c(0, 0.1))+scale_y_continuous(expand = c(0, 0))+coord_fixed()+geom_hline(yintercept=9.2,linetype=2)+geom_vline(xintercept=6.6,linetype=2)
+
+
+#male detection 
+mal.male_det_p<- mal.mod_dat %>% 
+   ggplot(aes(male_sl,female_sl,fill=male_det))+geom_tile(alpha=0.85)+scale_fill_viridis("Detection distance (r,m)",option="H",end=0.95)+geom_contour2(
+     aes(z=male_det,label = after_stat(level)),
+     col="black",
+     breaks = AnchorBreaks(50, binwidth = 10),
+    label.placer=label_placer_fraction(frac=0.35,                              rot_adjuster=isoband::angle_halfcircle_bottom())
+     )+
+  labs(subtitle="male")+
+  theme_minimal(10)+theme(legend.position = "bottom",legend.key.width= unit(0.5, 'cm'),legend.text = element_text(size=7), axis.ticks =element_line(size=1),
+  plot.subtitle = element_text(hjust = 0.5,face="bold")                        )+coord_fixed()+xlab("Male Standard Length (cm)")+ylab("Female Standard Length")+scale_x_continuous(expand = c(0, 0.1))+scale_y_continuous(expand = c(0, 0))+coord_fixed()+geom_hline(yintercept=9.2,linetype=2)+geom_vline(xintercept=6.6,linetype=2)
+
+mal.fem_det_p<- mal.mod_dat %>% 
+   ggplot(aes(female_sl,male_sl,fill=fem_det))+geom_tile(alpha=0.85)+scale_fill_viridis("Detection distance (r,m)",option="H",end=0.95)+geom_contour2(
+     aes(z=fem_det,label = after_stat(level)),
+     col="black",
+     breaks = AnchorBreaks(50, binwidth = 25),
+    label.placer=label_placer_fraction(frac=0.15,                              rot_adjuster=isoband::angle_halfcircle_bottom())
+     )+theme_minimal(10)+
+  labs(title="M. niger",subtitle = "female")+
+  theme(legend.position = "bottom",legend.key.width= unit(0.5, 'cm'),legend.text = element_text(size=7), axis.ticks =element_line(size=1),
+       plot.title = element_text(face="italic",hjust=0.5),
+       plot.subtitle = element_text(hjust = 0.5,face="bold")   
+        )+coord_fixed()+xlab("Female Standard Length")+ylab("Male Standard Length")+scale_x_continuous(expand = c(0, 0.1))+scale_y_continuous(expand = c(0, 0))+coord_fixed()+geom_hline(yintercept=6.6,linetype=2)+geom_vline(xintercept=9.2,linetype=2)
+
+
+```
+
+
+```{r photgap,message=F}
+
+
+phot.flux <- lm(log(flux)~log(sl)*sex,all.dat %>% filter(genus=="Photostomias"))
+
+phot.diam <- lm(diam~sl*sex,all.dat %>% filter(genus=="Photostomias"))
+
+phot.mod_dat <- expand_grid(female_sl=sls,male_sl=sls) %>%
+  mutate(
+    n=1:n(),
+  ) %>% 
+group_by(n) %>% 
+  mutate(
+  male_flux=predict(
+    phot.flux,newdata=data.frame(sex="M",sl=male_sl)) %>% exp,
+    male_diam=predict(phot.diam,newdata=data.frame(sex="M",sl=male_sl)),
+    fem_flux=predict(phot.flux,newdata=data.frame(sex="F",sl=female_sl)) %>% exp,
+    fem_diam=predict(phot.diam,newdata=data.frame(sex="F",sl=female_sl)),
+    male_det=r.dist(E=fem_flux,A=male_diam),
+    fem_det=r.dist(E=male_flux,A=fem_diam),
+  det_ratio=log(fem_det)-log(male_det))
+  
+
+phot.det_ratio_p<- phot.mod_dat %>% 
+  ggplot(aes(male_sl,female_sl,fill=det_ratio))+geom_tile(alpha=0.85)+scale_fill_viridis("Detection log Ratio",option="H",begin=0.4)+geom_contour2(
+    aes(z=det_ratio,label = after_stat(level)),
+    col="black",
+     breaks = AnchorBreaks(0, binwidth = 0.25),
+    label.placer=label_placer_fraction(frac=0.25,                              rot_adjuster=isoband::angle_halfcircle_bottom())
+    )+theme_minimal(10)+theme(legend.position = "bottom",legend.key.width= unit(0.5, 'cm'),legend.text = element_text(size=7), axis.ticks =element_line(size=1))+coord_fixed()+xlab("Male Standard Length (cm)")+ylab("")+scale_x_continuous(expand = c(0, 0.1))+scale_y_continuous(expand = c(0, 0))+geom_hline(yintercept=7.14,linetype=2)+geom_vline(xintercept=6.41,linetype=2)
+
+phot.male_det_p<- phot.mod_dat %>% 
+  ggplot(aes(male_sl,female_sl,fill=male_det))+geom_tile(alpha=0.85)+scale_fill_viridis("Detection distance (r,m)",option="H",end=0.9)+geom_contour2(
+    aes(z=male_det,label = after_stat(level)),
+    col="black",
+    breaks = AnchorBreaks(10, binwidth = 2.5),
+    label.placer=label_placer_fraction(frac=0.35,                              rot_adjuster=isoband::angle_halfcircle_bottom())
+    )+theme_minimal(10)+
+  labs(subtitle  ="male")+
+  theme(legend.position = "bottom",legend.key.width= unit(0.5, 'cm'),legend.text = element_text(size=7), axis.ticks =element_line(size=1),
+    plot.subtitle = element_text(face="bold",hjust=0.5)    
+        )+coord_fixed()+xlab("Male Standard Length")+ylab("Female Standard Length")+scale_x_continuous(expand = c(0, 0))+scale_y_continuous(expand = c(0, 0))+geom_hline(yintercept=7.14,linetype=2)+geom_vline(xintercept=6.41,linetype=2)
+
+phot.fem_det_p<- phot.mod_dat %>% 
+  ggplot(aes(female_sl,male_sl,fill=fem_det))+geom_tile(alpha=0.85)+scale_fill_viridis("Detection distance (r,m)",option="H",end=0.9)+geom_contour2(
+    aes(z=fem_det,label = after_stat(level)),
+    col="black",
+    breaks = AnchorBreaks(10, binwidth = 10),
+    label.placer=label_placer_fraction(frac=0.35,                              rot_adjuster=isoband::angle_halfcircle_bottom())
+    )+theme_minimal(10)+
+  labs(title="P. guernei",subtitle = "female")+
+  theme(legend.position = "bottom",legend.key.width= unit(0.5, 'cm'),legend.text = element_text(size=7), axis.ticks =element_line(size=1),
+plot.title = element_text(face="italic",hjust = 0.5),
+plot.subtitle = element_text(face="bold",hjust=0.5)
+)+coord_fixed()+xlab("Female Standard Length")+ylab("Male Standard Length")+scale_x_continuous(expand = c(0, 0))+scale_y_continuous(expand = c(0, 0))+geom_hline(yintercept=8.41,linetype=2)+geom_vline(xintercept=7.14,linetype=2)
+
+#checking
+# mal.mod_dat %>%
+#   filter(male_sl==7.5) %>%
+#   ggplot(aes(female_sl,det_ratio))+geom_point()
+```
+
+```{r fig2}
+
+gap_s1_p<- plot_grid(mal.fem_det_p,phot.fem_det_p,mal.male_det_p,phot.male_det_p,nrow=2)
+print(gap_s1_p)
+
+gap_p<- plot_grid(mal.det_ratio_p,phot.det_ratio_p,nrow=1)
+gaps_p <- plot_grid(rd_p,gap_p,ncol=1,rel_heights = c(0.6,1),rel_widths =c(0.9,1) ,labels = c("A","B"),label_size = 12,vjust = 1.2)
+print(gaps_p)
+
+```
+
+
+### Summary stats mentioned in paper
+
+```{r sumstat}
+all.dat %>% 
+  group_by(sex,genus) %>% 
+  summarize(min(detect),max(detect))
+```
+
+### Print Figures
+
+#### Figures in text
+```{r figures}
+if(dir.exists("~/Dropbox/Documents/UGResearch/Helena")){
+#Figure 2
+
+
+ggsave("~/Dropbox/Documents/UGResearch/Helena/reg_plots.pdf",reg_p,w=9,h=9)
+
+
+#Figure 3
+
+ggsave("~/Dropbox/Documents/UGResearch/Helena/detection_plots.pdf",gaps_p,w=6,h=7)
+
+#Supplemental figure
+
+
+if(dir.exists("~/Dropbox/Documents/UGResearch/Helena"))
+ggsave("~/Dropbox/Documents/UGResearch/Helena/supp_detection_plots.pdf",gap_s1_p,w=7,h=8)
+}
+```
+
+
+#### Specimen table
+```{r spectab}
+
+if(dir.exists("~/Dropbox/Documents/UGResearch/Helena")){all.dat %>% 
+  ungroup %>% 
+  select(
+  species,  
+  mcz,
+  sex,
+  sl
+) %>%
+  mutate(sl=round(sl,1)) %>% 
+  rename(`Standard Length (cm)`=sl,`MCZ Catalog No.`=mcz) %>%
+     kable(format = 'latex',longtable = T,caption="Specimens analyzed in the study \\label{tab:spectab}",digits = 2) %>% 
+ write_lines( file='~/Dropbox/Documents/UGResearch/Helena/spec_tab.tex')
+}
+```
+
+#### AIC tables
+
+```{r aics}
+if(dir.exists("~/Dropbox/Documents/UGResearch/Helena")){
+  
+
+lens_AIC %>%
+    mutate(sl=sl*1e4) %>% 
+    rename(`sl (1e4)`=sl) %>%
+  kable(format = 'latex',caption="Model fitting metrics for lens-diameter regressions in both species. Included model paramaters are indicated with `+` or there values \\label{tab:lens_aic}",digits = 2) %>% 
+ write_lines( file='~/Dropbox/Documents/UGResearch/Helena/lens_AIC.tex')
+
+  
+flux_AIC%>% 
+  kable( format = 'latex',caption="Model fitting metrics for photophore flux regressions in both species. Included model paramaters are indicated with `+` or there values \\label{tab:flux_aic}",digits = 2) %>% 
+  write_lines( file='~/Dropbox/Documents/UGResearch/Helena/flux_AIC.tex')
+
+  detect_AIC %>% 
+    kable( format = 'latex',caption="Model fitting metrics for detection distance in both species. Included model paramaters are indicated with `+` or there values \\label{tab:detect_aic}",digits = 2) %>% 
+  write_lines( file='~/Dropbox/Documents/UGResearch/Helena/detect_AIC.tex')
+
+}
+
+```
+
+
