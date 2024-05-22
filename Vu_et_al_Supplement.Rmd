@@ -489,11 +489,9 @@ plot.subtitle = element_text(face="bold",hjust=0.5)
 ```{r fig2}
 
 gap_s1_p<- plot_grid(mal.fem_det_p,phot.fem_det_p,mal.male_det_p,phot.male_det_p,nrow=2)
-print(gap_s1_p)
 
 gap_p<- plot_grid(mal.det_ratio_p,phot.det_ratio_p,nrow=1)
 gaps_p <- plot_grid(rd_p,gap_p,ncol=1,rel_heights = c(0.6,1),rel_widths =c(0.9,1) ,labels = c("A","B"),label_size = 12,vjust = 1.2)
-print(gaps_p)
 
 ```
 
@@ -515,17 +513,23 @@ if(dir.exists("~/Dropbox/Documents/UGResearch/Helena")){
 
 
 ggsave("~/Dropbox/Documents/UGResearch/Helena/reg_plots.pdf",reg_p,w=9,h=9)
+  
+ggsave("~/Dropbox/Documents/UGResearch/Helena/figures/Figure2.jpg",reg_p,w=7,h=7,device="jpeg",dpi=750)
 
 
 #Figure 3
 
 ggsave("~/Dropbox/Documents/UGResearch/Helena/detection_plots.pdf",gaps_p,w=6,h=7)
 
+ggsave("~/Dropbox/Documents/UGResearch/Helena/figures/Figure3.jpg",gaps_p,w=6,h=7,device="jpeg",dpi=750)
+
 #Supplemental figure
 
 
 if(dir.exists("~/Dropbox/Documents/UGResearch/Helena"))
 ggsave("~/Dropbox/Documents/UGResearch/Helena/supp_detection_plots.pdf",gap_s1_p,w=7,h=8)
+
+ggsave("~/Dropbox/Documents/UGResearch/Helena/figures/FigureS1.jpg",gap_s1_p,w=6,h=7,device="jpeg",dpi=750)
 }
 ```
 
